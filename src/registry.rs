@@ -56,6 +56,8 @@ pub const VECTOR_SCENE: &str = "vector-scene-v1";
 pub const OVERLAY_INPUT: &str = "overlay-input-v1";
 /// Host text measurement and platform editor positioning for overlays.
 pub const OVERLAY_TEXT: &str = "overlay-text-v1";
+/// Bounded native surrounding text and revision-scoped document editing.
+pub const OVERLAY_EDITOR: &str = "overlay-editor-v1";
 /// Batched text measurement with retained layouts and vector command tag 10.
 pub const OVERLAY_TEXT_LAYOUT: &str = "overlay-text-layout-v1";
 /// Nondefault paragraph typography in styled overlay text.
@@ -120,6 +122,10 @@ pub(crate) mod record {
     pub const OVERLAY_ENV_CHANGED: u16 = 0x7036;
     /// Publishes an overlay's accessibility tree, `overlay-a11y-v1`.
     pub const SET_OVERLAY_SEMANTICS: u16 = 0x7037;
+    /// Publishes the focused displayed window's document context.
+    pub const SET_OVERLAY_TEXT_CONTEXT: u16 = 0x7038;
+    /// Delivers a revision-scoped native document edit on the interactive lane.
+    pub const OVERLAY_TEXT_EDIT: u16 = 0x7039;
     /// The producer's first control record; it opens a session (core §6.1).
     pub const HELLO: u16 = 0x0001;
     /// The presenter's reply to `HELLO` that establishes the session (core §6.2).
@@ -543,6 +549,7 @@ pub fn prerequisites(profile: &str) -> Option<&'static [&'static str]> {
         VECTOR_SCENE => Some(&[LIVE_MEDIA]),
         OVERLAY_INPUT => Some(&[TERMINAL_OVERLAY]),
         OVERLAY_TEXT => Some(&[OVERLAY_INPUT]),
+        OVERLAY_EDITOR => Some(&[OVERLAY_TEXT]),
         OVERLAY_TEXT_LAYOUT => Some(&[OVERLAY_TEXT]),
         OVERLAY_TYPOGRAPHY => Some(&[OVERLAY_TEXT_LAYOUT]),
         OVERLAY_PAINT => Some(&[TERMINAL_OVERLAY]),

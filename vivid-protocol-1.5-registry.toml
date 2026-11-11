@@ -1166,3 +1166,18 @@ prerequisites = ["terminal-overlay-v1"]
 value = 0x7037
 name = "SET_OVERLAY_SEMANTICS"
 state = "standards-track"
+
+[[profile]]
+name = "overlay-editor-v1"
+state = "standards-track"
+prerequisites = ["overlay-text-v1"]
+
+[[record]]
+value = 0x7038
+name = "SET_OVERLAY_TEXT_CONTEXT"
+state = "standards-track"
+
+[[record]]
+value = 0x7039
+name = "OVERLAY_TEXT_EDIT"
+state = "standards-track"

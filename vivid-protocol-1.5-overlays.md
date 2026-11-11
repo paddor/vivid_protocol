@@ -335,6 +335,61 @@ or publication of a different scene revision. A new focused scene must publish n
 When no eligible editor geometry remains, platform IME placement returns to the terminal cursor.
 Native IME queries MUST use locally cached geometry rather than synchronously querying a producer.
 
+## Native document editing
+
+`overlay-editor-v1` requires `overlay-text-v1`. It adds bounded surrounding text,
+document selection and replacement to composition-only input. Hosts without these
+native callbacks MUST decline it, including terminating relays until they forward
+this contract with independent authenticated owner identities. It adds no authority
+for a producer to inspect another editor or obtain platform document contents.
+
+`SET_OVERLAY_TEXT_CONTEXT` (0x7038) is an authenticated control request with the window
+surface object ID. Keys 0–2 are the window address; key 3 is the nonzero actually
+displayed scene revision. Key 4 is null to disable document editing, or
+`[editor,revision,text,cursor,anchor,sensitive]`. Editor and revision are nonzero u64.
+Text is a UTF-8 excerpt, at most 4096 bytes, excluding preedit and containing the
+complete current selection. Cursor and anchor are UTF-8 byte boundaries in that
+excerpt; reversed selection is allowed. Sensitive is a boolean; sensitive contexts
+MUST publish empty text and zero offsets. The correlated response is OK. Admission
+requires the focused, input-eligible window, current surface generation and displayed
+native geometry. A host MUST bound its retained contexts and fail excess admission.
+
+The producer MUST increase the editor incarnation when switching fields or making
+external text/selection changes; it MUST NOT reuse an incarnation within a window
+lifetime. Ordered native edits retain the incarnation and advance revision when text
+or document selection changes. For one editor, revisions MUST NOT decrease, and an
+identical revision MUST describe identical text/selection/sensitivity. A new editor
+may restart revision. Disabling context retains the incarnation/revision floor.
+Re-enabling after a clear or changing sensitivity MUST advance the editor incarnation.
+Context follows the original authenticated source/channel, surface and focus grant.
+Focus loss, hide, close, lane loss, source replacement or disconnect MUST revoke its
+native callbacks. Repaint can retain queries but MUST defer edits until the producer
+publishes context for the newly displayed scene. Native queries use the bounded local
+snapshot and MUST NOT block on a producer. Stale callbacks MUST NOT retarget a new editor.
+
+`OVERLAY_TEXT_EDIT` (0x7039) travels on the authenticated overlay interactive lane.
+Keys 0–2 are the original window address, 3 the actually displayed scene revision,
+4 editor, 5 excerpt revision, 6 null or replacement `[start,end]`, 7 null or standalone
+document selection `[cursor,anchor]`, 8 null or committed UTF-8 text, and 9 null or
+`[preedit,selection]`, where selection is null or ordered `[start,end]` in preedit bytes.
+All fields are required; unknown fields are invalid. Commit and preedit are each at
+most 4096 bytes. Ranges are ordered, end-exclusive UTF-8 byte boundaries. Document
+selection may be reversed and MUST NOT be combined with commit, preedit or replacement.
+A replacement requires commit or preedit, covers the complete current document selection,
+and uses the exact current revision. Standalone document selection also requires that
+revision. Sensitive contexts forbid absolute replacement and document selection.
+Selection-relative operations use null replacement and can carry an earlier revision
+from their own ordered replies, never a future revision or different editor incarnation.
+
+A commit replaces the specified range or current selection/preedit; an empty commit
+performs deletion. Without a commit, replacement selects the document range covered by
+the new preedit. Preedit never becomes committed document text merely by being queried.
+Absent or empty preedit clears composition. The producer MUST validate editor identity,
+revision and UTF-8 boundaries again before mutation, including queued operations, and
+MUST bound the resulting document. Stale operations are discarded. Native input queues
+MUST remain bounded and isolated from control, rendering and unrelated owners. Hosts
+MUST NOT emit this record without the negotiated profile and a published context.
+
 ## Batched styled text and retained layouts
 
 `overlay-text-layout-v1` requires `overlay-text-v1`. It adds the following authenticated control

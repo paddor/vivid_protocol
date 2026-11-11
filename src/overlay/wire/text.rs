@@ -10,6 +10,7 @@ use super::{
 };
 use crate::vector::{Canvas, Command, Text};
 
+pub mod editor;
 pub mod styled;
 
 /// Most UTF-8 bytes one measurement may cover.
