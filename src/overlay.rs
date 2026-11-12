@@ -697,6 +697,11 @@ impl Windows {
         self.eligible(id)
     }
 
+    /// Reports focus-request eligibility without requiring native pane activation.
+    pub fn focus_eligible(&self, id: SurfaceIdentity) -> bool {
+        self.window_eligible(id)
+    }
+
     /// Returns the owner whose dismissal consumes this button's release.
     pub fn swallowed_button_owner(&self, button: u16) -> Option<SessionIdentity> {
         self.swallowed_buttons.get(&button).copied()
@@ -1025,6 +1030,48 @@ impl Windows {
             );
         }
         Ok(Some(next))
+    }
+
+    /// Records a physical host's accepted focus action without granting local input.
+    ///
+    /// A terminating relay advances its own window revision and stacking after the
+    /// independent host accepts the action. Focus, capture and remembered focus
+    /// remain driven by physical input events, including while the pane is inactive.
+    ///
+    /// # Errors
+    /// Returns [`InvalidScene`] for a non-focus action, invalid address, missing
+    /// window, stale generation/revision or exhausted window revision.
+    pub fn acknowledge_focus_action(
+        &mut self,
+        owner: SessionIdentity,
+        action: wire::Action,
+    ) -> Result<u64, InvalidScene> {
+        action
+            .payload()
+            .map_err(|_| InvalidScene("invalid window action"))?;
+        if action.action != wire::WindowAction::Focus {
+            return Err(InvalidScene("expected focus action"));
+        }
+        let id = action
+            .address
+            .identity(owner)
+            .map_err(|_| InvalidScene("invalid window identity"))?;
+        let window = self
+            .entries
+            .get_mut(&id)
+            .ok_or(InvalidScene("window does not exist"))?;
+        if window.generation != action.address.generation
+            || window.revision != action.expected_revision
+        {
+            return Err(InvalidScene("stale window generation or revision"));
+        }
+        let next = window
+            .revision
+            .checked_add(1)
+            .ok_or(InvalidScene("window revision exhausted"))?;
+        window.revision = next;
+        self.raise_group(id);
+        Ok(next)
     }
 
     fn raise_group(&mut self, id: SurfaceIdentity) {
@@ -1798,6 +1845,66 @@ fn valid_event(event: &Event) -> bool {
 mod tests {
     use super::*;
     use crate::identity::PresenterInstanceId;
+    #[test]
+    fn relayed_focus_acknowledgement_advances_only_its_window_without_fabricating_input() {
+        let mut windows = Windows::default();
+        let a = key(1, 1);
+        let b = key(2, 1);
+        windows.create(a, 1, options(WindowMode::Floating)).unwrap();
+        windows.create(b, 1, options(WindowMode::Floating)).unwrap();
+        windows.request_focus(b).unwrap();
+        windows.capture_pointer(b, Point::default()).unwrap();
+        for owner in [a.context.session, b.context.session] {
+            while windows.take_event(owner).is_some() {}
+        }
+        let action = wire::Action {
+            address: wire::WindowAddress {
+                context_id: a.context().context_id(),
+                surface_id: a.surface_id(),
+                generation: 1,
+            },
+            expected_revision: 1,
+            action: wire::WindowAction::Focus,
+        };
+        let generation = windows.focus_generation();
+        assert_eq!(
+            windows
+                .acknowledge_focus_action(a.context.session, action)
+                .unwrap(),
+            2
+        );
+        assert_eq!(windows.get(b).unwrap().revision, 1);
+        assert_eq!(windows.focus(), Some(b));
+        assert_eq!(windows.captured_window(), Some(b));
+        assert_eq!(windows.focus_generation(), generation);
+        assert!(windows.take_event(a.context.session).is_none());
+        assert!(windows.take_event(b.context.session).is_none());
+        windows
+            .acknowledge_focus_action(key(3, 1).context.session, action)
+            .unwrap_err();
+        windows
+            .acknowledge_focus_action(a.context.session, action)
+            .unwrap_err();
+        windows.set_pane_focus(false);
+        let inactive = wire::Action {
+            expected_revision: 2,
+            ..action
+        };
+        assert!(!windows.input_eligible(a));
+        assert!(windows.focus_eligible(a));
+        assert_eq!(
+            windows
+                .acknowledge_focus_action(a.context.session, inactive)
+                .unwrap(),
+            3
+        );
+        windows.set_pane_focus(true);
+        assert_eq!(
+            windows.focus(),
+            Some(b),
+            "acknowledgement cannot invent remembered focus"
+        );
+    }
     #[test]
     fn input_only_revocation_retains_pixels_and_releases_only_its_owners_blockade() {
         let mut windows = Windows::default();
