@@ -702,6 +702,18 @@ impl Windows {
         self.window_eligible(id)
     }
 
+    /// Reports eligibility for an existing producer window action.
+    pub fn action_eligible(&self, id: SurfaceIdentity, action: wire::WindowAction) -> bool {
+        match action {
+            wire::WindowAction::Focus => self.window_eligible(id),
+            wire::WindowAction::Raise => self.eligible(id),
+            wire::WindowAction::Lower => self.eligible(id) && self.top_modal().is_none(),
+            wire::WindowAction::Center | wire::WindowAction::Close => {
+                self.entries.contains_key(&id)
+            }
+        }
+    }
+
     /// Returns the owner whose dismissal consumes this button's release.
     pub fn swallowed_button_owner(&self, button: u16) -> Option<SessionIdentity> {
         self.swallowed_buttons.get(&button).copied()
@@ -996,20 +1008,7 @@ impl Windows {
                         "lowering is blocked by visibility or an active modal",
                     ));
                 }
-                let group: Vec<_> = self
-                    .stack
-                    .iter()
-                    .copied()
-                    .filter(|child| self.descendant(*child, id))
-                    .collect();
-                self.stack.retain(|key| !group.contains(key));
-                let index = self
-                    .entries
-                    .get(&id)
-                    .and_then(|w| w.options.parent)
-                    .and_then(|p| self.stack.iter().position(|key| *key == p))
-                    .map_or(0, |index| index + 1);
-                self.stack.splice(index..index, group);
+                self.lower_group(id);
             }
             wire::WindowAction::Center => {}
             wire::WindowAction::Close => unreachable!("close handled before advancing revision"),
@@ -1072,6 +1071,99 @@ impl Windows {
         window.revision = next;
         self.raise_group(id);
         Ok(next)
+    }
+
+    /// Records a physical host's accepted window action in the original namespace.
+    ///
+    /// Focus and capture remain authoritative physical input state. Center uses
+    /// confirmed original-pane bounds; close revokes only its window and descendants.
+    ///
+    /// # Errors
+    /// Returns [`InvalidScene`] for stale identity/revision, exhausted revision,
+    /// invalid center bounds, a size change, or bounds on a non-center action.
+    pub fn acknowledge_relayed_action(
+        &mut self,
+        owner: SessionIdentity,
+        action: wire::Action,
+        bounds: Option<Rect>,
+    ) -> Result<Option<u64>, InvalidScene> {
+        action
+            .payload()
+            .map_err(|_| InvalidScene("invalid window action"))?;
+        if (action.action == wire::WindowAction::Center) != bounds.is_some() {
+            return Err(InvalidScene("unexpected action geometry"));
+        }
+        if action.action == wire::WindowAction::Focus {
+            return self.acknowledge_focus_action(owner, action).map(Some);
+        }
+        let id = action
+            .address
+            .identity(owner)
+            .map_err(|_| InvalidScene("invalid window identity"))?;
+        let window = self
+            .entries
+            .get(&id)
+            .ok_or(InvalidScene("window does not exist"))?;
+        if window.generation != action.address.generation
+            || window.revision != action.expected_revision
+        {
+            return Err(InvalidScene("stale window generation or revision"));
+        }
+        if action.action == wire::WindowAction::Close {
+            self.close(id, DismissReason::Closed);
+            return Ok(None);
+        }
+        let next = window
+            .revision
+            .checked_add(1)
+            .ok_or(InvalidScene("window revision exhausted"))?;
+        if let Some(bounds) = bounds {
+            bounds.validate()?;
+            if bounds.width != window.options.bounds.width
+                || bounds.height != window.options.bounds.height
+            {
+                return Err(InvalidScene("center acknowledgement changed window size"));
+            }
+        }
+        match action.action {
+            wire::WindowAction::Raise => self.raise_group(id),
+            wire::WindowAction::Lower => self.lower_group(id),
+            wire::WindowAction::Center => {}
+            wire::WindowAction::Focus | wire::WindowAction::Close => unreachable!("handled above"),
+        }
+        let window = self
+            .entries
+            .get_mut(&id)
+            .ok_or(InvalidScene("window lost during action"))?;
+        window.revision = next;
+        if let Some(bounds) = bounds {
+            window.options.bounds = bounds;
+            self.emit(
+                id,
+                Event::Geometry {
+                    bounds,
+                    settled: true,
+                },
+            );
+        }
+        Ok(Some(next))
+    }
+
+    fn lower_group(&mut self, id: SurfaceIdentity) {
+        let group: Vec<_> = self
+            .stack
+            .iter()
+            .copied()
+            .filter(|child| self.descendant(*child, id))
+            .collect();
+        self.stack.retain(|key| !group.contains(key));
+        let index = self
+            .entries
+            .get(&id)
+            .and_then(|window| window.options.parent)
+            .and_then(|parent| self.stack.iter().position(|key| *key == parent))
+            .map_or(0, |index| index + 1);
+        self.stack.splice(index..index, group);
     }
 
     fn raise_group(&mut self, id: SurfaceIdentity) {
@@ -1845,6 +1937,97 @@ fn valid_event(event: &Event) -> bool {
 mod tests {
     use super::*;
     use crate::identity::PresenterInstanceId;
+    #[test]
+    fn relayed_stacking_center_and_close_preserve_a_same_id_peers_input() {
+        let mut windows = Windows::default();
+        let a = key(1, 1);
+        let b = key(2, 1);
+        let child = key(1, 2);
+        windows.create(a, 1, options(WindowMode::Floating)).unwrap();
+        let mut child_options = options(WindowMode::Popup);
+        child_options.parent = Some(a);
+        windows.create(child, 1, child_options).unwrap();
+        windows.create(b, 1, options(WindowMode::Floating)).unwrap();
+        windows.request_focus(b).unwrap();
+        windows.capture_pointer(b, Point::default()).unwrap();
+        while windows.take_event(b.context.session).is_some() {}
+        let action = wire::Action {
+            address: wire::WindowAddress {
+                context_id: a.context().context_id(),
+                surface_id: a.surface_id(),
+                generation: 1,
+            },
+            expected_revision: 1,
+            action: wire::WindowAction::Raise,
+        };
+        assert_eq!(
+            windows
+                .acknowledge_relayed_action(a.context.session, action, None)
+                .unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            windows
+                .visible()
+                .map(|window| window.identity)
+                .collect::<Vec<_>>(),
+            vec![b, a, child]
+        );
+        let lower = wire::Action {
+            action: wire::WindowAction::Lower,
+            expected_revision: 2,
+            ..action
+        };
+        assert_eq!(
+            windows
+                .acknowledge_relayed_action(a.context.session, lower, None)
+                .unwrap(),
+            Some(3)
+        );
+        assert_eq!(
+            windows
+                .visible()
+                .map(|window| window.identity)
+                .collect::<Vec<_>>(),
+            vec![a, child, b]
+        );
+        let old = windows.get(a).unwrap().options.bounds;
+        let centered = Rect::new(40., 50., old.width.get(), old.height.get()).unwrap();
+        let center = wire::Action {
+            action: wire::WindowAction::Center,
+            expected_revision: 3,
+            ..action
+        };
+        assert_eq!(
+            windows
+                .acknowledge_relayed_action(a.context.session, center, Some(centered))
+                .unwrap(),
+            Some(4)
+        );
+        assert_eq!(windows.get(a).unwrap().options.bounds, centered);
+        assert_eq!(windows.focus(), Some(b));
+        assert_eq!(windows.captured_window(), Some(b));
+        assert_eq!(windows.get(b).unwrap().revision, 1);
+        let close = wire::Action {
+            action: wire::WindowAction::Close,
+            expected_revision: 4,
+            ..action
+        };
+        assert_eq!(
+            windows
+                .acknowledge_relayed_action(a.context.session, close, None)
+                .unwrap(),
+            None
+        );
+        assert!(windows.get(a).is_none() && windows.get(child).is_none());
+        assert!(windows.get(b).is_some());
+        assert_eq!(windows.focus(), Some(b));
+        assert_eq!(windows.captured_window(), Some(b));
+        assert!(windows.take_event(b.context.session).is_none());
+        windows
+            .acknowledge_relayed_action(a.context.session, close, None)
+            .unwrap_err();
+    }
     #[test]
     fn relayed_focus_acknowledgement_advances_only_its_window_without_fabricating_input() {
         let mut windows = Windows::default();
