@@ -828,11 +828,16 @@ impl Windows {
             self.swallowed_escape = None;
         }
     }
+    /// Returns all retained windows, bottom to top, including hidden windows.
+    ///
+    /// This preserves stacking intent when a host reconstructs its windows.
+    pub fn stacked(&self) -> impl Iterator<Item = &Window> {
+        self.stack.iter().filter_map(|id| self.entries.get(id))
+    }
+
     /// Returns the effectively visible windows, bottom to top.
     pub fn visible(&self) -> impl Iterator<Item = &Window> {
-        self.stack
-            .iter()
-            .filter_map(|id| self.entries.get(id))
+        self.stacked()
             .filter(|w| self.effectively_visible(w.identity))
     }
     /// Creates window `id` at `generation` with `options`.
@@ -1937,6 +1942,49 @@ fn valid_event(event: &Event) -> bool {
 mod tests {
     use super::*;
     use crate::identity::PresenterInstanceId;
+    #[test]
+    fn stacked_retains_hidden_same_id_peers_in_authoritative_order() {
+        let mut windows = Windows::default();
+        let a = key(1, 1);
+        let b = key(2, 1);
+        windows.create(a, 1, options(WindowMode::Floating)).unwrap();
+        windows.create(b, 1, options(WindowMode::Floating)).unwrap();
+        let mut hidden = options(WindowMode::Floating);
+        hidden.visible = false;
+        windows.update(a, 1, 1, hidden).unwrap();
+        assert_eq!(
+            windows.stacked().map(|w| w.identity).collect::<Vec<_>>(),
+            [a, b]
+        );
+        assert_eq!(
+            windows.visible().map(|w| w.identity).collect::<Vec<_>>(),
+            [b]
+        );
+        let action = wire::Action {
+            address: wire::WindowAddress {
+                context_id: 1,
+                surface_id: 1,
+                generation: 1,
+            },
+            expected_revision: 1,
+            action: wire::WindowAction::Lower,
+        };
+        windows
+            .acknowledge_relayed_action(b.context().session(), action, None)
+            .unwrap();
+        assert_eq!(
+            windows.stacked().map(|w| w.identity).collect::<Vec<_>>(),
+            [b, a]
+        );
+        windows.close(b, DismissReason::Closed);
+        assert_eq!(
+            windows.stacked().map(|w| w.identity).collect::<Vec<_>>(),
+            [a]
+        );
+        assert_eq!(windows.get(a).unwrap().revision, 2);
+        assert!(windows.visible().next().is_none());
+    }
+
     #[test]
     fn relayed_stacking_center_and_close_preserve_a_same_id_peers_input() {
         let mut windows = Windows::default();
