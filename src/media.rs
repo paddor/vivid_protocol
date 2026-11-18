@@ -904,7 +904,9 @@ fn encode_zstd_pixels(rgba: &[u8]) -> io::Result<Vec<u8>> {
 fn decode_zstd_pixels(pixels: &[u8], expected: usize) -> io::Result<Vec<u8>> {
     let header = zrip::frame::header::parse_frame_header(pixels)
         .map_err(|_| invalid("invalid zstd frame"))?;
-    if header.dict_id.is_some() || zstd_frame_len(pixels, &header) != Some(pixels.len()) {
+    if header.dict_id.is_some()
+        || zrip::frame::find_frame_compressed_size(pixels) != Ok(pixels.len())
+    {
         return Err(invalid(
             "zstd dictionaries and trailing frames are forbidden",
         ));
@@ -929,31 +931,6 @@ fn decode_zstd_pixels(pixels: &[u8], expected: usize) -> io::Result<Vec<u8>> {
         ));
     }
     Ok(output)
-}
-
-/// Length of the zstd frame at the start of `bytes`, from its block headers,
-/// or `None` if it is truncated or has a reserved block type.
-fn zstd_frame_len(bytes: &[u8], header: &zrip::frame::header::FrameHeader) -> Option<usize> {
-    let mut offset = header.header_size;
-    loop {
-        let block = bytes.get(offset..offset.checked_add(3)?)?;
-        let block = u32::from(block[0]) | u32::from(block[1]) << 8 | u32::from(block[2]) << 16;
-        let size = match (block >> 1) & 3 {
-            // Raw and compressed blocks store `size` bytes.
-            0 | 2 => (block >> 3) as usize,
-            // RLE blocks store one byte.
-            1 => 1,
-            _ => return None,
-        };
-        offset = offset.checked_add(3 + size)?;
-        if block & 1 == 1 {
-            break;
-        }
-    }
-    if header.content_checksum {
-        offset = offset.checked_add(4)?;
-    }
-    (offset <= bytes.len()).then_some(offset)
 }
 
 pub fn is_portable_packetization(codec: &str, packetization: &str) -> bool {
